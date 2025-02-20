@@ -71,7 +71,7 @@ impl BytePacketBuffer {
         Ok(())
     }
 
-    fn read(&mut self) -> Result<u8> {
+    fn _read(&mut self) -> Result<u8> {
         if self.pos >= 512 {
             return Err(BytePacketBufferError::EndOfBuffer);
         }
@@ -85,7 +85,7 @@ impl BytePacketBuffer {
     }
 
     fn get(&self, pos: usize) -> Result<u8> {
-        if self.pos >= 512 {
+        if pos >= 512 {
             return Err(BytePacketBufferError::EndOfBuffer);
         }
         Ok(self.buf[pos])
@@ -104,15 +104,36 @@ impl BytePacketBuffer {
         Ok(&self.buf[start..start + len])
     }
 
-    fn read_u16(&mut self) -> Result<u16> {
-        let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
+    fn read_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
+        if self.pos() + len >= 512 {
+            return Err(BytePacketBufferError::EndOfBuffer);
+        }
 
-        Ok(res)
+        let range = &self.buf[start..start + len];
+        self.pos += len;
+        Ok(range)
+    }
+
+    fn read_u16(&mut self) -> Result<u16> {
+        let bytes = self.read_range(self.pos(), 2)?.try_into().unwrap();
+
+        Ok(u16::from_be_bytes(bytes))
+
+        //let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
+
+        //Ok(res)
     }
 
     fn read_u32(&mut self) -> Result<u32> {
-        let res = ((self.read_u16()? as u32) << 16) | (self.read_u16()? as u32);
-        Ok(res)
+        //if self.pos() + 4 > 512 {
+        //    return Err(BytePacketBufferError::EndOfBuffer);
+        //}
+
+        let bytes = self.read_range(self.pos(), 4)?.try_into().unwrap();
+
+        Ok(u32::from_be_bytes(bytes))
+        //let res = ((self.read_u16()? as u32) << 16) | (self.read_u16()? as u32);
+        //Ok(res)
     }
 
     fn read_qname(&mut self, out_buf: &mut String) -> Result<()> {
@@ -205,14 +226,22 @@ impl BytePacketBuffer {
     }
 
     pub fn write_u16(&mut self, val: u16) -> Result<()> {
-        self.write_u8((val >> 8) as u8)?;
-        self.write_u8((val & u8::MAX as u16/*0xFF*/) as u8)?;
+        let bytes = val.to_be_bytes();
+        for b in bytes {
+            self.write_u8(b)?;
+        }
+        //self.write_u8((val >> 8) as u8)?;
+        //self.write_u8((val & u8::MAX as u16/*0xFF*/) as u8)?;
         Ok(())
     }
 
     pub fn write_u32(&mut self, val: u32) -> Result<()> {
-        self.write_u16((val >> 16) as u16)?;
-        self.write_u16((val & u16::MAX as u32/*0xFFFF*/) as u16)?;
+        let bytes = val.to_be_bytes();
+        for b in bytes {
+            self.write_u8(b)?;
+        }
+        //self.write_u16((val >> 16) as u16)?;
+        //self.write_u16((val & u16::MAX as u32/*0xFFFF*/) as u16)?;
         Ok(())
     }
 
@@ -671,66 +700,80 @@ impl DnsRecord {
 
         match qtype {
             QueryType::A => {
-                let raw_addr = buffer.read_u32()?;
-                let addr = Ipv4Addr::new(
-                    // converts a raw to an ip and mask it to 255
-                    //
-                    // Our raw 32-bit number for 192.168.1.1
-                    // let raw_addr: u32 = 0xC0A80101;
-                    //
-                    // // Extract the first octet: shift right 24 bits to move the highest 8 bits to the lowest position
-                    // // which we put it in the last 2 bytes
-                    // // 0xC0A80101 => 0x000000C0
-                    // // masking it with 255 would remove the zeros, lefting with 0XC0
-                    //
-                    //  ((raw_addr >> 24) & 0xFF) as u8; // (0xC0A80101 >> 24) -> 0xC0 -> 192
-
-                    // // Extract the second octet: shift right 16 bits
-                    // // put it in the last 4 bytes
-                    // // 0xC0A80101 => 0x0000C0A8; and masked to 255 removes the zeros => 0xC0A8
-                    // ((raw_addr >> 16) & 0xFF) as u8; // (0xC0A80101 >> 16) -> 0xC0A8 >> 16 -> 0xA8 -> 168
-
-                    // // Extract the third octet: shift right 8 bits
-                    // // put it in the last 6 bytes
-                    // // 0xC0A80101 => 0x00C0A801; and masked to 255 removes the zeros => 0xC0A801
-                    // ((raw_addr >> 8) & 0xFF) as u8;  // (0xC0A80101 >> 8) -> 0xC0A801 >> 8 -> 0x01 -> 1
-                    //
-
-                    // // Extract the fourth octet: no shift needed (shift by 0)
-                    // // hex:
-                    //      0xC0A80101
-                    // // bin:
-                    //      11000000 10101000 00000001 00000001    --
-                    //                                               -- & bitwise (both have to be 1)
-                    //                             0.. 11111111    --
-                    //                             -- this is 255 in binary
-                    //
-                    //      so we get only the first, which is `1`
-                    //
-                    //  ((raw_addr >> 0) & 0xFF) as u8;  // (0xC0A80101) & 0xFF -> 0x01 -> 1
-                    ((raw_addr >> 24) & u8::MAX as u32) as u8,
-                    ((raw_addr >> 16) & u8::MAX as u32) as u8,
-                    ((raw_addr >> 8) & u8::MAX as u32) as u8,
-                    (raw_addr & u8::MAX as u32) as u8,
-                );
+                let raw_addr = buffer.read_u32()?.to_be_bytes();
+                let addr = Ipv4Addr::from(raw_addr);
+                //let addr = Ipv4Addr::new(
+                //    // converts a raw to an ip and mask it to 255
+                //    //
+                //    // Our raw 32-bit number for 192.168.1.1
+                //    // let raw_addr: u32 = 0xC0A80101;
+                //    //
+                //    // // Extract the first octet: shift right 24 bits to move the highest 8 bits to the lowest position
+                //    // // which we put it in the last 2 bytes
+                //    // // 0xC0A80101 => 0x000000C0
+                //    // // masking it with 255 would remove the zeros, lefting with 0XC0
+                //    //
+                //    //  ((raw_addr >> 24) & 0xFF) as u8; // (0xC0A80101 >> 24) -> 0xC0 -> 192
+                //
+                //    // // Extract the second octet: shift right 16 bits
+                //    // // put it in the last 4 bytes
+                //    // // 0xC0A80101 => 0x0000C0A8; and masked to 255 removes the zeros => 0xC0A8
+                //    // ((raw_addr >> 16) & 0xFF) as u8; // (0xC0A80101 >> 16) -> 0xC0A8 >> 16 -> 0xA8 -> 168
+                //
+                //    // // Extract the third octet: shift right 8 bits
+                //    // // put it in the last 6 bytes
+                //    // // 0xC0A80101 => 0x00C0A801; and masked to 255 removes the zeros => 0xC0A801
+                //    // ((raw_addr >> 8) & 0xFF) as u8;  // (0xC0A80101 >> 8) -> 0xC0A801 >> 8 -> 0x01 -> 1
+                //    //
+                //
+                //    // // Extract the fourth octet: no shift needed (shift by 0)
+                //    // // hex:
+                //    //      0xC0A80101
+                //    // // bin:
+                //    //      11000000 10101000 00000001 00000001    --
+                //    //                                               -- & bitwise (both have to be 1)
+                //    //                             0.. 11111111    --
+                //    //                             -- this is 255 in binary
+                //    //
+                //    //      so we get only the first, which is `1`
+                //    //
+                //    //  ((raw_addr >> 0) & 0xFF) as u8;  // (0xC0A80101) & 0xFF -> 0x01 -> 1
+                //    ((raw_addr >> 24) & u8::MAX as u32) as u8,
+                //    ((raw_addr >> 16) & u8::MAX as u32) as u8,
+                //    ((raw_addr >> 8) & u8::MAX as u32) as u8,
+                //    (raw_addr & u8::MAX as u32) as u8,
+                //);
 
                 Ok(DnsRecord::A { domain, addr, ttl })
             }
             QueryType::AAAA => {
-                let raw_addr1 = buffer.read_u32()?;
-                let raw_addr2 = buffer.read_u32()?;
-                let raw_addr3 = buffer.read_u32()?;
-                let raw_addr4 = buffer.read_u32()?;
+                //let raw_addr1 = buffer.read_u32()?;
+                //let raw_addr2 = buffer.read_u32()?;
+                //let raw_addr3 = buffer.read_u32()?;
+                //let raw_addr4 = buffer.read_u32()?;
+                //let u16_max = u16::MAX as u32;
+
                 let addr = Ipv6Addr::new(
-                    ((raw_addr1 >> 16) & u16::MAX as u32) as u16,
-                    (raw_addr1 & u16::MAX as u32) as u16,
-                    ((raw_addr2 >> 16) & u16::MAX as u32) as u16,
-                    (raw_addr2 & u16::MAX as u32) as u16,
-                    ((raw_addr3 >> 16) & u16::MAX as u32) as u16,
-                    (raw_addr3 & u16::MAX as u32) as u16,
-                    ((raw_addr4 >> 16) & u16::MAX as u32) as u16,
-                    (raw_addr4 & u16::MAX as u32) as u16,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
+                    buffer.read_u16()?,
                 );
+
+                //let addr = Ipv6Addr::new(
+                //    ((raw_addr1 >> 16) & u16_max) as u16,
+                //    (raw_addr1 & u16_max) as u16,
+                //    ((raw_addr2 >> 16) & u16_max) as u16,
+                //    (raw_addr2 & u16_max) as u16,
+                //    ((raw_addr3 >> 16) & u16_max) as u16,
+                //    (raw_addr3 & u16_max) as u16,
+                //    ((raw_addr4 >> 16) & u16_max) as u16,
+                //    (raw_addr4 & u16_max) as u16,
+                //);
 
                 Ok(DnsRecord::AAAA { domain, addr, ttl })
             }
@@ -1217,7 +1260,7 @@ fn from_qname() {
 }
 
 fn main() -> Result<()> {
-    let socket = UdpSocket::bind(("0.0.0.0", 5333))
+    let socket = UdpSocket::bind(("0.0.0.0", 53))
         .unwrap_or_else(|err| panic!("Failed to bind a new udp socket, error: {err}"));
 
     loop {
