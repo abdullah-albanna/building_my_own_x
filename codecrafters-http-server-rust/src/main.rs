@@ -1,9 +1,11 @@
-use std::collections::HashMap;
-use std::net::TcpListener;
-use std::{
-    io::{BufRead, BufReader, Write},
-    net::TcpStream,
-    str::FromStr,
+use std::str::FromStr;
+use std::{collections::HashMap, net::SocketAddr};
+
+use tokio::fs;
+use tokio::io::AsyncReadExt;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
 };
 
 use anyhow::Context;
@@ -71,11 +73,11 @@ struct HttpRequest {
 }
 
 impl HttpRequest {
-    fn new(stream: &mut TcpStream) -> Result<HttpRequest, HttpParseError> {
+    async fn new(stream: &mut TcpStream) -> Result<HttpRequest, HttpParseError> {
         let mut buffer = BufReader::new(stream);
 
         let mut first_line = String::new();
-        buffer.read_line(&mut first_line).unwrap();
+        buffer.read_line(&mut first_line).await.unwrap();
 
         let mut splitted_line = first_line.split_whitespace();
 
@@ -93,7 +95,7 @@ impl HttpRequest {
 
         let mut headers = HashMap::new();
         let mut headers_line = String::new();
-        while buffer.read_line(&mut headers_line).unwrap() > 0 {
+        while buffer.read_line(&mut headers_line).await.unwrap() > 0 {
             let line = headers_line.trim();
 
             if line.is_empty() {
@@ -121,8 +123,11 @@ impl HttpRequest {
     }
 }
 
-fn handle_stream(mut stream: TcpStream) -> anyhow::Result<()> {
-    let http_request = HttpRequest::new(&mut stream).context("parse http request")?;
+async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
+    println!("Accepted connection from {}", addr);
+    let http_request = HttpRequest::new(&mut stream)
+        .await
+        .context("parse http request")?;
     println!("{:#?}", http_request);
 
     let response = match http_request
@@ -137,6 +142,18 @@ fn handle_stream(mut stream: TcpStream) -> anyhow::Result<()> {
             "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{echo}",
             echo.len()
         ),
+
+        ["file", file] if fs::File::open(&format!("/tmp/{file}")).await.is_ok() => {
+            let mut file = fs::File::open(&format!("/tmp/{file}")).await.unwrap();
+            let mut content = String::new();
+            file.read_to_string(&mut content).await.unwrap();
+
+            &format!(
+            "HTTP/1.1 200 Ok\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}",
+                content.len(),
+                content
+            )
+        }
         ["user-agent"] if http_request.headers.contains_key("User-Agent") => {
             let user_agent = http_request.headers.get("User-Agent").unwrap();
 
@@ -149,23 +166,22 @@ fn handle_stream(mut stream: TcpStream) -> anyhow::Result<()> {
         _ => "HTTP/1.1 404 Not Found\r\n\r\n",
     };
 
-    stream.write_all(response.as_bytes()).unwrap();
+    stream.write_all(response.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                println!("accepted new connection");
-                handle_stream(stream)?;
+    while let Ok((stream, addr)) = listener.accept().await {
+        println!("accepted new connection");
+        tokio::spawn(async move {
+            if let Err(e) = handle_stream(stream, addr).await {
+                println!("Error handling the request, error: {e}");
             }
-            Err(e) => {
-                println!("error: {}", e);
-            }
-        }
+        });
     }
 
     Ok(())
