@@ -30,13 +30,43 @@ impl FromStr for HttpMethod {
 enum HttpParseError {
     #[error("Unable to parse the request method")]
     InvalidMethod,
+
+    #[error("Unable to parse the https version")]
+    InvalidHttpVersion,
+}
+
+#[derive(Debug)]
+enum HttpVersion {
+    ZeroPointNine,
+    OnePointZero,
+    OnePointOne,
+    Two,
+    Three,
+}
+
+impl FromStr for HttpVersion {
+    type Err = HttpParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s
+            .split_terminator('/')
+            .nth(1)
+            .ok_or(HttpParseError::InvalidHttpVersion)?
+        {
+            "0.9" => Ok(Self::ZeroPointNine),
+            "1.0" => Ok(Self::OnePointZero),
+            "1.1" => Ok(Self::OnePointOne),
+            "2" => Ok(Self::Two),
+            "3" => Ok(Self::Three),
+            _ => Err(HttpParseError::InvalidHttpVersion),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct HttpRequest {
     method: HttpMethod,
     path: Vec<String>,
-    http_ver: String,
+    http_ver: HttpVersion,
     headers: HashMap<String, String>,
 }
 
@@ -59,7 +89,7 @@ impl HttpRequest {
             .map(|s| s.to_string())
             .collect();
 
-        let http_ver = splitted_line.next().unwrap_or_default().to_string();
+        let http_ver = HttpVersion::from_str(splitted_line.next().unwrap_or_default())?;
 
         let mut headers = HashMap::new();
         let mut headers_line = String::new();
