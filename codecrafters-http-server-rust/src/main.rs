@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::{
     io::{BufRead, BufReader, Write},
@@ -32,57 +33,90 @@ enum HttpParseError {
 }
 
 #[derive(Debug)]
-struct HttpRequest<'a> {
+struct HttpRequest {
     method: HttpMethod,
-    path: Vec<&'a str>,
-    http_ver: &'a str,
+    path: Vec<String>,
+    http_ver: String,
+    headers: HashMap<String, String>,
 }
 
-impl<'a> HttpRequest<'a> {
-    fn new(line: &'a str) -> Result<HttpRequest<'a>, HttpParseError> {
-        let mut splitted_line = line.split_whitespace();
+impl HttpRequest {
+    fn new(stream: &mut TcpStream) -> Result<HttpRequest, HttpParseError> {
+        let mut buffer = BufReader::new(stream);
+
+        let mut first_line = String::new();
+        buffer.read_line(&mut first_line).unwrap();
+
+        let mut splitted_line = first_line.split_whitespace();
+
         let method = HttpMethod::from_str(splitted_line.next().unwrap_or_default())?;
+
         let path = splitted_line
             .next()
             .unwrap_or("/")
             .split_terminator('/')
             .skip(1)
+            .map(|s| s.to_string())
             .collect();
 
-        let http_ver = splitted_line.next().unwrap_or_default();
+        let http_ver = splitted_line.next().unwrap_or_default().to_string();
+
+        let mut headers = HashMap::new();
+        let mut headers_line = String::new();
+        while buffer.read_line(&mut headers_line).unwrap() > 0 {
+            let line = headers_line.trim();
+
+            if line.is_empty() {
+                break;
+            }
+
+            let mut headers_parts = headers_line.splitn(2, ':');
+
+            if let (Some(key), Some(value)) = (headers_parts.next(), headers_parts.next()) {
+                headers.insert(
+                    key.trim().to_string(),
+                    value.trim().trim_matches(['\r', '\n']).to_string(),
+                );
+            }
+
+            headers_line.clear();
+        }
 
         Ok(HttpRequest {
             method,
             path,
             http_ver,
+            headers,
         })
     }
 }
 
 fn handle_stream(mut stream: TcpStream) -> anyhow::Result<()> {
-    let mut buffer_read = BufReader::new(&stream);
-    let mut first_line = String::new();
-    buffer_read.read_line(&mut first_line).unwrap();
+    let http_request = HttpRequest::new(&mut stream).context("parse http request")?;
+    println!("{:#?}", http_request);
 
-    let http_request = HttpRequest::new(&first_line).context("parse http request")?;
+    let response = match http_request
+        .path
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => "HTTP/1.1 200 OK\r\n\r\n",
+        ["echo", echo] => &format!(
+            "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{echo}",
+            echo.len()
+        ),
+        ["user-agent"] if http_request.headers.contains_key("User-Agent") => {
+            let user_agent = http_request.headers.get("User-Agent").unwrap();
 
-    let response = if matches!(http_request.method, HttpMethod::Get)
-        && http_request.path.is_empty()
-        && http_request.http_ver == "HTTP/1.1"
-    {
-        "HTTP/1.1 200 OK\r\n\r\n"
-    } else if matches!(http_request.method, HttpMethod::Get)
-        && http_request.path.len() > 1
-        && http_request.http_ver == "HTTP/1.1"
-    {
-        match http_request.path.as_slice() {
-            ["echo", echo] => &format!(
-                "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\n{echo}"
-            ),
-            _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+            &format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                user_agent.len(),
+                user_agent
+            )
         }
-    } else {
-        "HTTP/1.1 404 Not Found\r\n\r\n"
+        _ => "HTTP/1.1 404 Not Found\r\n\r\n",
     };
 
     stream.write_all(response.as_bytes()).unwrap();
