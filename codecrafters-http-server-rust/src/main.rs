@@ -22,7 +22,7 @@ impl FromStr for HttpMethod {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "GET" => Ok(Self::Get),
-            "Post" => Ok(Self::Post),
+            "POST" => Ok(Self::Post),
             _ => Err(HttpParseError::InvalidMethod),
         }
     }
