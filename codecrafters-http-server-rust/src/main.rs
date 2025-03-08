@@ -70,6 +70,7 @@ struct HttpRequest {
     path: Vec<String>,
     http_ver: HttpVersion,
     headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
 }
 
 impl HttpRequest {
@@ -114,11 +115,24 @@ impl HttpRequest {
             headers_line.clear();
         }
 
+        let body = if let Some(content_size) = headers.get("Content-Length") {
+            let content_size: usize = content_size.parse().unwrap();
+
+            let mut body = vec![0; content_size];
+
+            buffer.read_exact(&mut body).await.unwrap();
+
+            Some(body)
+        } else {
+            None
+        };
+
         Ok(HttpRequest {
             method,
             path,
             http_ver,
             headers,
+            body,
         })
     }
 }
@@ -142,6 +156,22 @@ async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Resul
             "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{echo}",
             echo.len()
         ),
+
+        ["file", file]
+            if matches!(http_request.method, HttpMethod::Post) && http_request.body.is_some() =>
+        {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&format!("/tmp/{file}"))
+                .await
+                .unwrap();
+
+            file.write_all(&http_request.body.unwrap()).await.unwrap();
+
+            "HTTP/1.1 201 Created\r\n\r\n"
+        }
 
         ["file", file] if fs::File::open(&format!("/tmp/{file}")).await.is_ok() => {
             let mut file = fs::File::open(&format!("/tmp/{file}")).await.unwrap();
