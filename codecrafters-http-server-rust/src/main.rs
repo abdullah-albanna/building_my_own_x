@@ -1,3 +1,4 @@
+use async_compression::tokio::write::GzipEncoder;
 use std::str::FromStr;
 use std::{collections::HashMap, net::SocketAddr};
 
@@ -144,18 +145,39 @@ async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Resul
         .context("parse http request")?;
     println!("{:#?}", http_request);
 
-    let response = match http_request
+    let response: Vec<u8> = match http_request
         .path
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [] => "HTTP/1.1 200 OK\r\n\r\n",
-        ["echo", echo] => &format!(
-            "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{echo}",
-            echo.len()
-        ),
+        [] => "HTTP/1.1 200 OK\r\n\r\n".into(),
+        ["echo", echo] => {
+            if http_request
+                .headers
+                .get("Accept-Encoding")
+                .is_some_and(|s| s.eq("gzip"))
+            {
+                let mut encoder = GzipEncoder::new(Vec::new());
+                encoder.write_all(echo.as_bytes()).await.unwrap();
+                encoder.shutdown().await.unwrap();
+                let compressed_echo = encoder.into_inner();
+
+                let mut res = Vec::new();
+                res.extend(format!(
+                    "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                    compressed_echo.len(),
+                ).as_bytes());
+                res.extend(compressed_echo);
+                res
+            } else {
+                format!(
+                    "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{echo}",
+                    echo.len()
+                ).into()
+            }
+        }
 
         ["file", file]
             if matches!(http_request.method, HttpMethod::Post) && http_request.body.is_some() =>
@@ -170,7 +192,7 @@ async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Resul
 
             file.write_all(&http_request.body.unwrap()).await.unwrap();
 
-            "HTTP/1.1 201 Created\r\n\r\n"
+            "HTTP/1.1 201 Created\r\n\r\n".into()
         }
 
         ["file", file] if fs::File::open(&format!("/tmp/{file}")).await.is_ok() => {
@@ -178,25 +200,26 @@ async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Resul
             let mut content = String::new();
             file.read_to_string(&mut content).await.unwrap();
 
-            &format!(
+            format!(
             "HTTP/1.1 200 Ok\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}",
                 content.len(),
                 content
-            )
+            ).into()
         }
         ["user-agent"] if http_request.headers.contains_key("User-Agent") => {
             let user_agent = http_request.headers.get("User-Agent").unwrap();
 
-            &format!(
+            format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                 user_agent.len(),
                 user_agent
             )
+            .into()
         }
-        _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+        _ => "HTTP/1.1 404 Not Found\r\n\r\n".into(),
     };
 
-    stream.write_all(response.as_bytes()).await.unwrap();
+    stream.write_all(&response).await.unwrap();
     stream.flush().await.unwrap();
     Ok(())
 }
