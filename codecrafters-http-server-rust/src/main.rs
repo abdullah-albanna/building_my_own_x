@@ -157,7 +157,7 @@ async fn handle_stream(mut stream: TcpStream, addr: SocketAddr) -> anyhow::Resul
             if http_request
                 .headers
                 .get("Accept-Encoding")
-                .is_some_and(|s| s.eq("gzip"))
+                .is_some_and(|s| s.contains("gzip"))
             {
                 let mut encoder = GzipEncoder::new(Vec::new());
                 encoder.write_all(echo.as_bytes()).await.unwrap();
